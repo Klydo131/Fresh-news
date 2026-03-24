@@ -1,9 +1,15 @@
 import type { SearchResult } from "@/types";
+import { sanitizeUrl, safeHostname } from "@/lib/security/sanitize";
 
 /**
- * Web search providers - Tavily and Serper
+ * Web search providers - Tavily and Serper.
  * These power the "deep research" side, searching the live web.
+ *
+ * Security: All URLs are validated. All fetch calls have timeouts.
+ * API keys are sent via headers or POST body, never in URL params.
  */
+
+const SEARCH_TIMEOUT_MS = 10_000;
 
 export async function searchTavily(query: string): Promise<SearchResult[]> {
   const apiKey = process.env.TAVILY_API_KEY;
@@ -13,26 +19,34 @@ export async function searchTavily(query: string): Promise<SearchResult[]> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      api_key: apiKey,
+      api_key: apiKey, // Tavily requires key in body (their API design)
       query,
       search_depth: "advanced",
       include_answer: false,
       max_results: 10,
     }),
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
   });
 
   if (!res.ok) return [];
 
   const data = await res.json();
-  return (data.results || []).map(
-    (r: { title: string; url: string; content: string; published_date?: string }) => ({
-      title: r.title,
-      url: r.url,
-      snippet: r.content,
-      source: new URL(r.url).hostname,
+  const results: SearchResult[] = [];
+
+  for (const r of data.results || []) {
+    const url = sanitizeUrl(r.url);
+    if (!url) continue;
+
+    results.push({
+      title: String(r.title || "").slice(0, 500),
+      url,
+      snippet: String(r.content || "").slice(0, 2000),
+      source: safeHostname(url),
       publishedAt: r.published_date,
-    })
-  );
+    });
+  }
+
+  return results;
 }
 
 export async function searchSerper(query: string): Promise<SearchResult[]> {
@@ -43,23 +57,31 @@ export async function searchSerper(query: string): Promise<SearchResult[]> {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-API-KEY": apiKey,
+      "X-API-KEY": apiKey, // Key in header, not URL
     },
     body: JSON.stringify({ q: query, num: 10 }),
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
   });
 
   if (!res.ok) return [];
 
   const data = await res.json();
-  return (data.news || []).map(
-    (r: { title: string; link: string; snippet: string; source: string; date?: string }) => ({
-      title: r.title,
-      url: r.link,
-      snippet: r.snippet,
-      source: r.source,
+  const results: SearchResult[] = [];
+
+  for (const r of data.news || []) {
+    const url = sanitizeUrl(r.link);
+    if (!url) continue;
+
+    results.push({
+      title: String(r.title || "").slice(0, 500),
+      url,
+      snippet: String(r.snippet || "").slice(0, 2000),
+      source: String(r.source || safeHostname(url)),
       publishedAt: r.date,
-    })
-  );
+    });
+  }
+
+  return results;
 }
 
 export async function webSearch(query: string): Promise<SearchResult[]> {

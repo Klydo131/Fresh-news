@@ -7,6 +7,7 @@ import type {
 } from "@/types";
 import { callLLM } from "@/lib/llm/providers";
 import { gatherSources } from "@/lib/search";
+import { validateEnum } from "@/lib/security/sanitize";
 import {
   ANALYSIS_SYSTEM_PROMPT,
   buildAnalysisPrompt,
@@ -16,15 +17,29 @@ import {
 
 type PhaseCallback = (phase: ResearchPhase, partial?: Partial<ResearchReport>) => void;
 
-function safeJsonParse<T>(text: string): T | null {
+const VALID_SENTIMENTS = ["positive", "negative", "neutral", "mixed"] as const;
+
+function safeJsonParse(text: string): Record<string, unknown> | null {
   // Try to extract JSON from the response (LLMs sometimes wrap in markdown)
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return null;
   try {
-    return JSON.parse(jsonMatch[0]) as T;
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/** Validate and coerce an array of strings from untrusted JSON */
+function safeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((s) => s.slice(0, 1000)); // cap individual string length
 }
 
 async function analyzeArticle(
@@ -38,14 +53,7 @@ async function analyzeArticle(
     temperature: 0.2,
   });
 
-  const parsed = safeJsonParse<{
-    summary: string;
-    keyFacts: string[];
-    potentialBiases: string[];
-    biasScore: number;
-    sentiment: string;
-    credibilityNotes: string;
-  }>(response.content);
+  const parsed = safeJsonParse(response.content);
 
   if (!parsed) {
     return {
@@ -62,16 +70,24 @@ async function analyzeArticle(
     };
   }
 
+  // Runtime schema validation — never trust LLM output shapes
+  const biasScoreRaw = Number(parsed.biasScore);
+  const biasScore = Number.isFinite(biasScoreRaw)
+    ? Math.min(10, Math.max(0, Math.round(biasScoreRaw)))
+    : 5;
+
   return {
     id: `analysis-${article.id}`,
     article,
     analysis: {
-      summary: parsed.summary,
-      keyFacts: parsed.keyFacts || [],
-      potentialBiases: parsed.potentialBiases || [],
-      biasScore: Math.min(10, Math.max(0, parsed.biasScore || 0)),
-      sentiment: (parsed.sentiment as AnalyzedArticle["analysis"]["sentiment"]) || "neutral",
-      credibilityNotes: parsed.credibilityNotes || "",
+      summary: typeof parsed.summary === "string" ? parsed.summary.slice(0, 2000) : "No summary available.",
+      keyFacts: safeStringArray(parsed.keyFacts),
+      potentialBiases: safeStringArray(parsed.potentialBiases),
+      biasScore,
+      sentiment: validateEnum(parsed.sentiment, VALID_SENTIMENTS, "neutral"),
+      credibilityNotes: typeof parsed.credibilityNotes === "string"
+        ? parsed.credibilityNotes.slice(0, 2000)
+        : "",
     },
   };
 }
@@ -115,7 +131,7 @@ export async function runResearch(
 
   // Phase 3: Analyze each article with the chosen LLM
   onPhase?.("analyzing", report);
-  const batchSize = 3; // Analyze in batches to avoid rate limits
+  const batchSize = 3;
   const analyzed: AnalyzedArticle[] = [];
 
   for (let i = 0; i < toAnalyze.length; i += batchSize) {
@@ -150,21 +166,19 @@ export async function runResearch(
     temperature: 0.3,
   });
 
-  const synthParsed = safeJsonParse<{
-    overview: string;
-    consensusPoints: string[];
-    conflictingPoints: string[];
-    informationGaps: string[];
-    recommendation: string;
-  }>(synthesisResponse.content);
+  const synthParsed = safeJsonParse(synthesisResponse.content);
 
   if (synthParsed) {
     report.synthesis = {
-      overview: synthParsed.overview,
-      consensusPoints: synthParsed.consensusPoints || [],
-      conflictingPoints: synthParsed.conflictingPoints || [],
-      informationGaps: synthParsed.informationGaps || [],
-      recommendation: synthParsed.recommendation || "",
+      overview: typeof synthParsed.overview === "string"
+        ? synthParsed.overview.slice(0, 3000)
+        : "",
+      consensusPoints: safeStringArray(synthParsed.consensusPoints),
+      conflictingPoints: safeStringArray(synthParsed.conflictingPoints),
+      informationGaps: safeStringArray(synthParsed.informationGaps),
+      recommendation: typeof synthParsed.recommendation === "string"
+        ? synthParsed.recommendation.slice(0, 2000)
+        : "",
     };
   }
 

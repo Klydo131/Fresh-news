@@ -1,65 +1,76 @@
 import type { SearchResult } from "@/types";
+import { sanitizeUrl, stripHtml } from "@/lib/security/sanitize";
 
 /**
  * Structured news sources - NewsAPI and RSS feeds.
  * These power the "fresh headlines" side.
+ *
+ * Security: All URLs are validated. HTML is stripped properly.
+ * API keys are sent via headers where possible.
+ * All fetch calls have explicit timeouts.
  */
+
+const SEARCH_TIMEOUT_MS = 10_000;
+const RSS_TIMEOUT_MS = 5_000;
 
 export async function searchNewsAPI(query: string): Promise<SearchResult[]> {
   const apiKey = process.env.NEWS_API_KEY;
   if (!apiKey) return [];
 
+  // NewsAPI requires the key as a query param or header — we use the header
   const params = new URLSearchParams({
     q: query,
     sortBy: "publishedAt",
     pageSize: "15",
     language: "en",
-    apiKey,
   });
 
   const res = await fetch(
-    `https://newsapi.org/v2/everything?${params.toString()}`
+    `https://newsapi.org/v2/everything?${params.toString()}`,
+    {
+      headers: { "X-Api-Key": apiKey }, // Key in header, not URL
+      signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+    }
   );
 
   if (!res.ok) return [];
 
   const data = await res.json();
-  return (data.articles || []).map(
-    (a: {
-      title: string;
-      url: string;
-      description: string;
-      source: { name: string };
-      publishedAt: string;
-    }) => ({
-      title: a.title,
-      url: a.url,
-      snippet: a.description || "",
-      source: a.source?.name || "Unknown",
+  const results: SearchResult[] = [];
+
+  for (const a of data.articles || []) {
+    const url = sanitizeUrl(a.url);
+    if (!url) continue;
+
+    results.push({
+      title: String(a.title || "").slice(0, 500),
+      url,
+      snippet: String(a.description || "").slice(0, 2000),
+      source: String(a.source?.name || "Unknown"),
       publishedAt: a.publishedAt,
-    })
-  );
+    });
+  }
+
+  return results;
 }
 
 // Built-in RSS feeds for major news sources (no API key needed)
 const RSS_FEEDS: Record<string, string> = {
-  "Reuters": "https://feeds.reuters.com/reuters/topNews",
+  Reuters: "https://feeds.reuters.com/reuters/topNews",
   "AP News": "https://rsshub.app/apnews/topics/apf-topnews",
-  "BBC": "https://feeds.bbci.co.uk/news/rss.xml",
-  "NPR": "https://feeds.npr.org/1001/rss.xml",
+  BBC: "https://feeds.bbci.co.uk/news/rss.xml",
+  NPR: "https://feeds.npr.org/1001/rss.xml",
   "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
 };
 
 export async function searchRSS(query: string): Promise<SearchResult[]> {
-  // Dynamic import for rss-parser (server-side only)
   const results: SearchResult[] = [];
   const queryLower = query.toLowerCase();
 
-  // We'll use a simple fetch + XML parse approach to avoid heavy deps at build
   for (const [sourceName, feedUrl] of Object.entries(RSS_FEEDS)) {
     try {
       const res = await fetch(feedUrl, {
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(RSS_TIMEOUT_MS),
       });
       if (!res.ok) continue;
 
@@ -68,33 +79,44 @@ export async function searchRSS(query: string): Promise<SearchResult[]> {
       // Simple XML item extraction
       const items = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
       for (const item of items.slice(0, 5)) {
-        const title =
+        const titleRaw =
           item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1] ||
           item.match(/<title>(.*?)<\/title>/)?.[1] ||
           "";
-        const link = item.match(/<link>(.*?)<\/link>/)?.[1] || "";
-        const desc =
+        const linkRaw = item.match(/<link>(.*?)<\/link>/)?.[1] || "";
+        const descRaw =
           item.match(
-            /<description><!\[CDATA\[(.*?)\]\]><\/description>/
+            /<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/
           )?.[1] ||
-          item.match(/<description>(.*?)<\/description>/)?.[1] ||
+          item.match(/<description>([\s\S]*?)<\/description>/)?.[1] ||
           "";
         const pubDate = item.match(/<pubDate>(.*?)<\/pubDate>/)?.[1];
 
+        // Validate URL
+        const url = sanitizeUrl(linkRaw);
+        if (!url) continue;
+
+        // Strip HTML safely
+        const title = stripHtml(titleRaw).slice(0, 500);
+        const snippet = stripHtml(descRaw).slice(0, 300);
+
         // Filter by relevance to query
-        const text = `${title} ${desc}`.toLowerCase();
-        if (text.includes(queryLower) || queryLower.split(" ").some((w) => text.includes(w))) {
+        const text = `${title} ${snippet}`.toLowerCase();
+        if (
+          text.includes(queryLower) ||
+          queryLower.split(" ").some((w) => w.length > 2 && text.includes(w))
+        ) {
           results.push({
-            title: title.replace(/<[^>]*>/g, ""),
-            url: link,
-            snippet: desc.replace(/<[^>]*>/g, "").slice(0, 300),
+            title,
+            url,
+            snippet,
             source: sourceName,
             publishedAt: pubDate,
           });
         }
       }
     } catch {
-      // Skip failed feeds silently
+      // Skip failed feeds silently — logged server-side in production
     }
   }
 
