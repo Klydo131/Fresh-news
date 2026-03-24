@@ -1,5 +1,8 @@
 "use client";
 
+import { Suspense, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { Header } from "@/components/layout/Header";
 import { LLMSelector } from "@/components/research/LLMSelector";
 import { SearchBar } from "@/components/research/SearchBar";
@@ -9,8 +12,29 @@ import { SynthesisPanel } from "@/components/research/SynthesisPanel";
 import { VerdictSummary } from "@/components/research/VerdictSummary";
 import { useResearchStore } from "@/lib/store/research-store";
 
-export default function Home() {
-  const { phase, report, error, reset } = useResearchStore();
+function DemoBanner() {
+  return (
+    <div className="glass rounded-lg p-3 border-fresh-500/20 text-center fade-in">
+      <p className="text-sm text-fresh-400">
+        Demo Mode — showing pre-built research on &quot;AI regulation&quot;
+      </p>
+      <p className="text-xs text-gray-500 mt-1">
+        Add your API keys in <code>.env</code> to research any topic live
+      </p>
+    </div>
+  );
+}
+
+function HomeContent() {
+  const { phase, report, error, reset, isDemo, startDemo } = useResearchStore();
+  const searchParams = useSearchParams();
+
+  // Auto-start demo if ?demo=true is in the URL
+  useEffect(() => {
+    if (searchParams.get("demo") === "true" && phase === "idle") {
+      startDemo();
+    }
+  }, [searchParams, phase, startDemo]);
 
   return (
     <div className="min-h-screen">
@@ -28,6 +52,22 @@ export default function Home() {
               AI to analyze each article for bias, facts, and credibility.{" "}
               <span className="text-white">You make the final call.</span>
             </p>
+
+            {/* Quick actions */}
+            <div className="flex items-center justify-center gap-3 mt-6">
+              <button
+                onClick={() => startDemo()}
+                className="px-5 py-2.5 rounded-lg bg-fresh-600 text-white text-sm font-medium hover:bg-fresh-500 transition-colors"
+              >
+                Try Demo
+              </button>
+              <Link
+                href="/tutorial"
+                className="px-5 py-2.5 rounded-lg border border-[var(--border)] text-sm text-gray-400 hover:text-white hover:border-gray-600 transition-colors"
+              >
+                How It Works
+              </Link>
+            </div>
           </div>
         )}
 
@@ -36,6 +76,9 @@ export default function Home() {
           <SearchBar />
           <LLMSelector />
         </div>
+
+        {/* Demo banner */}
+        {isDemo && phase === "complete" && <DemoBanner />}
 
         {/* Phase progress */}
         <PhaseIndicator />
@@ -100,11 +143,33 @@ export default function Home() {
           <p>
             Fresh News AI Research Machine — The AI analyzes, you decide.
           </p>
-          <p className="mt-1">
-            Powered by your choice of LLM. No editorial bias by design.
-          </p>
+          <div className="mt-2 flex items-center justify-center gap-4">
+            <Link
+              href="/tutorial"
+              className="text-gray-500 hover:text-fresh-500 transition-colors"
+            >
+              Tutorial
+            </Link>
+            <span className="text-gray-700">|</span>
+            <a
+              href="https://github.com/Klydo131/Fresh-news"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gray-500 hover:text-fresh-500 transition-colors"
+            >
+              GitHub
+            </a>
+          </div>
         </footer>
       </main>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense>
+      <HomeContent />
+    </Suspense>
   );
 }

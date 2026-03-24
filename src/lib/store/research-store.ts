@@ -13,6 +13,7 @@ interface ResearchState {
   // Settings
   selectedProvider: LLMProvider;
   searchDepth: "quick" | "standard" | "deep";
+  isDemo: boolean;
 
   // Research state
   currentTopic: string;
@@ -28,6 +29,7 @@ interface ResearchState {
   setDepth: (depth: "quick" | "standard" | "deep") => void;
   setTopic: (topic: string) => void;
   startResearch: () => Promise<void>;
+  startDemo: () => Promise<void>;
   setVerdict: (articleId: string, verdict: UserVerdict, reason?: string) => void;
   reset: () => void;
 }
@@ -35,6 +37,7 @@ interface ResearchState {
 export const useResearchStore = create<ResearchState>((set, get) => ({
   selectedProvider: "claude",
   searchDepth: "standard",
+  isDemo: false,
   currentTopic: "",
   phase: "idle",
   report: null,
@@ -49,7 +52,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
     const { currentTopic, selectedProvider, searchDepth } = get();
     if (!currentTopic.trim()) return;
 
-    set({ phase: "searching", error: null, report: null, verdicts: {} });
+    set({ phase: "searching", error: null, report: null, verdicts: {}, isDemo: false });
 
     try {
       const res = await fetch("/api/research", {
@@ -77,6 +80,37 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
     }
   },
 
+  startDemo: async () => {
+    set({
+      phase: "searching",
+      error: null,
+      report: null,
+      verdicts: {},
+      isDemo: true,
+      currentTopic: "AI regulation",
+    });
+
+    // Simulate the research phases with delays so users see the pipeline
+    const phases: ResearchPhase[] = ["searching", "gathering", "analyzing", "synthesizing"];
+    for (const phase of phases) {
+      set({ phase });
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+
+    try {
+      const res = await fetch("/api/demo", { method: "POST" });
+      if (!res.ok) throw new Error("Demo failed to load");
+
+      const report: ResearchReport = await res.json();
+      set({ report, phase: "complete" });
+    } catch (err) {
+      set({
+        phase: "error",
+        error: err instanceof Error ? err.message : "Demo failed to load",
+      });
+    }
+  },
+
   setVerdict: (articleId, verdict, reason) => {
     set((state) => ({
       verdicts: {
@@ -98,5 +132,6 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
       error: null,
       verdicts: {},
       currentTopic: "",
+      isDemo: false,
     }),
 }));
